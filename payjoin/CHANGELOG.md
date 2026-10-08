@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fix `WantsInputs::contribute_inputs` undercounting the receiver's change when called more than
+  once: a prior call's credit to the change output was double-counted as a new shortfall on the
+  next call, silently turning part of an earlier contribution into transaction fee (#1940).
+
 ## 1.2.0
 
 This release adds a non-blocking interface to the receiver state machine.

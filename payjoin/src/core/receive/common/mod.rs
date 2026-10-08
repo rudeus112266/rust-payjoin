@@ -425,13 +425,25 @@ impl WantsInputs {
 
     // Compute the minimum amount that the receiver must contribute to the transaction as input.
     //
-    // Output values are sender-supplied, so either sum can overflow.
+    // `self.proposal.payjoin_psbt`'s outputs already reflect change credited by any previous
+    // `contribute_inputs` call, so that amount is netted back out here. Otherwise a prior
+    // contribution's credit would be miscounted as a new shortfall on this call, see
+    // https://github.com/payjoin/rust-payjoin/issues/1940.
+    //
+    // Output values are sender-supplied, so sums can overflow.
     fn receiver_min_input_amount(&self) -> Result<Amount, InputContributionError> {
         let output_amount =
             checked_sum(self.proposal.payjoin_psbt.unsigned_tx.output.iter().map(|o| o.value))?;
         let original_output_amount =
             checked_sum(self.original.original_psbt.unsigned_tx.output.iter().map(|o| o.value))?;
-        Ok(output_amount.checked_sub(original_output_amount).unwrap_or(Amount::ZERO))
+        let already_credited = checked_sum(
+            self.proposal.receiver_inputs.iter().map(|input| input.previous_txout().value),
+        )?;
+        Ok(output_amount
+            .checked_sub(already_credited)
+            .unwrap_or(Amount::ZERO)
+            .checked_sub(original_output_amount)
+            .unwrap_or(Amount::ZERO))
     }
 
     /// Commits the inputs as final, and moves on to the next typestate.
@@ -844,6 +856,40 @@ mod tests {
         assert_eq!(wants_inputs.proposal.receiver_inputs.len(), 2);
         assert_eq!(wants_inputs.proposal.receiver_inputs[0], input_pair_1);
         assert_eq!(wants_inputs.proposal.receiver_inputs[1], input_pair_2);
+    }
+
+    /// Regression test for https://github.com/payjoin/rust-payjoin/issues/1940.
+    ///
+    /// Two separate `contribute_inputs` calls must credit the receiver's change output by the
+    /// same total amount as a single call contributing both inputs together.
+    #[test]
+    fn repeated_input_contributions_accumulate_change() {
+        let original = original_from_test_vector();
+        let wants_inputs = WantsOutputs::new(original, vec![0]).commit_outputs();
+        let original_drain_value = wants_inputs.proposal.payjoin_psbt.unsigned_tx.output
+            [wants_inputs.proposal.change_vout]
+            .value;
+
+        let first_value = Amount::from_sat(100);
+        let second_value = Amount::from_sat(200);
+        let first_input = candidate_input_from_test_vector(first_value);
+        let second_input = candidate_input_from_test_vector(second_value);
+
+        let wants_inputs = wants_inputs
+            .contribute_inputs([first_input])
+            .expect("first input contribution should succeed")
+            .contribute_inputs([second_input])
+            .expect("second input contribution should succeed");
+
+        let drain_value = wants_inputs.proposal.payjoin_psbt.unsigned_tx.output
+            [wants_inputs.proposal.change_vout]
+            .value;
+
+        assert_eq!(
+            drain_value,
+            original_drain_value + first_value + second_value,
+            "the drain output should include both input contributions in full"
+        );
     }
 
     #[test]
